@@ -104,6 +104,8 @@ VERTICAL_BEAM_DIVERGENCE = 1.5e-3  # radians
 AVAILABLE_CAMERAS = ("front", "front_left", "front_right", "back", "left", "right")
 
 
+ego_shift = np.array([-3.0, 0.0, 0.0]) * 0
+
 @dataclass
 class PandaSetDataParserConfig(ADDataParserConfig):
     """PandaSet dataset config.
@@ -173,6 +175,10 @@ class PandaSet(ADDataParser):
                 curr_cam = self.sequence.camera[camera]
                 file_path = curr_cam._data_structure[i]
                 pose = _pandaset_pose_to_matrix(curr_cam.poses[i])
+                
+                # PandaSet coordinate system: x-right, y-forward, z-up
+                pose[:3, 3] += ego_shift
+                
                 pose[:3, :3] = pose[:3, :3] @ OPENCV_TO_NERFSTUDIO
                 intrinsic_ = curr_cam.intrinsics
                 intrinsic = np.array(
@@ -218,6 +224,10 @@ class PandaSet(ADDataParser):
             # the lidar scans are synced such that the middle of a scan is at the same time as the front camera image
             front_cam = self.sequence.camera["front_camera"]
             front_cam2w = _pandaset_pose_to_matrix(front_cam.poses[i])
+            
+            # PandaSet coordinate system: x-right, y-forward, z-up
+            front_cam2w[:3, 3] += ego_shift
+            
             front_cam_extrinsics = self.extrinsics["front_camera"]
             front_cam_extrinsics["position"] = front_cam_extrinsics["extrinsic"]["transform"]["translation"]
             front_cam_extrinsics["heading"] = front_cam_extrinsics["extrinsic"]["transform"]["rotation"]
@@ -265,18 +275,17 @@ class PandaSet(ADDataParser):
             l2w = pose_utils.to4x4(lidar.lidar_to_worlds)
 
             # Load point cloud
-            point_cloud = torch.from_numpy(read_point_cloud(filename))
+            point_cloud = torch.from_numpy(read_point_cloud(filename)).double()
             point_cloud[:, 3] /= MAX_RELECTANCE_VALUE
             if lidar_idx == LIDAR_NAME_TO_INDEX["Pandar64"]:
                 point_clouds_in_world.append(point_cloud[point_cloud[:, -1] == LIDAR_NAME_TO_INDEX["Pandar64"], :-1])
             points = point_cloud[:, :3]
             # transform points from world space to sensor space
-            points = torch.hstack((points, torch.ones((points.shape[0], 1))))
-            points = (torch.matmul(torch.linalg.inv(l2w), points.T).T)[:, :3]
+            points = torch.hstack((points, torch.ones((points.shape[0], 1)))) ###########
+            points = (torch.matmul(torch.linalg.inv(l2w), points.T).T)[:, :3] ###########
             point_cloud[:, :3] = points
-
             # and adjust the point cloud timestamps accordingly
-            point_cloud[:, 4] -= lidar.times
+            point_cloud[:, 4] -= lidar.times # in sim lidar time is correct
 
             pc = point_cloud[point_cloud[:, -1] == lidar_idx, :-1]
             point_clouds.append(pc.float())
@@ -285,7 +294,7 @@ class PandaSet(ADDataParser):
             lidars
         ), f"Number of point clouds ({len(point_clouds)}) does not match number of lidars ({len(lidars)})"
 
-        if self.config.add_missing_points:
+        if False:#self.config.add_missing_points: #
             poses = lidars.lidar_to_worlds
             times = lidars.times.squeeze(-1)
 

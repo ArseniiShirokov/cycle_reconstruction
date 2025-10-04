@@ -768,11 +768,20 @@ def chamfer_distance(
     target_pc = target_pc.view(1, -1, 3)
 
     def _chamfer_dist(source, target):
-        dist = torch.cdist(source, target, p=2, compute_mode="use_mm_for_euclid_dist_if_necessary").pow(2)
-        dist = dist.view(source.shape[1], target.shape[1])
-        min_dist_source_to_target, _ = torch.min(dist, dim=1)
-        min_dist_target_to_source, _ = torch.min(dist, dim=0)
-        return min_dist_source_to_target.sum(), min_dist_target_to_source.sum()
+        with torch.no_grad():
+            dist = torch.cdist(source, target, p=2, compute_mode="use_mm_for_euclid_dist_if_necessary").pow(2)
+            dist = dist.view(source.shape[1], target.shape[1])
+            min_dist_source_to_target, _ = torch.min(dist, dim=1)
+            min_dist_target_to_source, _ = torch.min(dist, dim=0)
+            return min_dist_source_to_target.sum(), min_dist_target_to_source.sum()
+
+        # from chamferdist import ChamferDistance
+        # chd = ChamferDistance()
+        # dist1 = chd(source, target, reverse=False, point_reduction="sum")
+        # dist2 = chd(source, target, reverse=True, point_reduction="sum")
+        # return dist1, dist2
+
+        # return min_dist_source_to_target.sum(), min_dist_target_to_source.sum()
 
     if chunk_size is None:
         min_dist_source_to_target, min_dist_target_to_source = _chamfer_dist(source_pc, target_pc)

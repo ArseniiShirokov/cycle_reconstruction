@@ -60,7 +60,7 @@ class ADDataParserConfig(DataParserConfig):
     """target class to instantiate"""
     sequence: str = "001"
     """Name of the sequence to load."""
-    train_split_fraction: float = 0.5
+    train_split_fraction: float = 1.0
     """The percent of images to use for training. The remaining images are for eval."""
     train_eval_split_type: SplitTypes = SplitTypes.LINSPACE
     """The type of split to use for train/eval."""
@@ -340,15 +340,27 @@ class ADDataParser(DataParser):
             train_indices = torch.arange(sensor_idxs.numel(), dtype=torch.int64)
             eval_indices = train_indices.clone()
         else:
-            train_indices = []
+            # train_indices = []
+            # for sensor_idx in sensor_idxs.unique():
+            #     sensor_sample_idxs = (sensor_idxs == sensor_idx).nonzero().squeeze(-1)
+            #     # split according to train_split_fraction
+            #     num_for_train_split = math.ceil(len(sensor_sample_idxs) * self.config.train_split_fraction)
+            #     sensor_train_split = np.linspace(0, len(sensor_sample_idxs) - 1, num_for_train_split, dtype=np.int64)
+            #     train_indices += sensor_sample_idxs[sensor_train_split]
+            # eval_indices = np.setdiff1d(np.arange(len(sensor_idxs)), train_indices)
+            # train_indices, eval_indices = torch.tensor(train_indices), torch.from_numpy(eval_indices)
+
+            # Our split
+            eval_indices = []
             for sensor_idx in sensor_idxs.unique():
                 sensor_sample_idxs = (sensor_idxs == sensor_idx).nonzero().squeeze(-1)
                 # split according to train_split_fraction
-                num_for_train_split = math.ceil(len(sensor_sample_idxs) * self.config.train_split_fraction)
-                sensor_train_split = np.linspace(0, len(sensor_sample_idxs) - 1, num_for_train_split, dtype=np.int64)
-                train_indices += sensor_sample_idxs[sensor_train_split]
-            eval_indices = np.setdiff1d(np.arange(len(sensor_idxs)), train_indices)
-            train_indices, eval_indices = torch.tensor(train_indices), torch.from_numpy(eval_indices)
+                stride = 2
+                sensor_eval_split = np.array(range(stride, len(sensor_sample_idxs), stride), dtype=np.int64)
+                eval_indices += sensor_sample_idxs[sensor_eval_split]
+                
+            train_indices = np.setdiff1d(np.arange(len(sensor_idxs)), eval_indices)
+            train_indices, eval_indices = torch.from_numpy(train_indices), torch.tensor(eval_indices)
 
         if self.config.max_eval_frames is not None:
             torch.manual_seed(123)

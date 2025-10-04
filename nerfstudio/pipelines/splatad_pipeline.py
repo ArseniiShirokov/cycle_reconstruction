@@ -260,6 +260,9 @@ class SplatADPipeline(VanillaPipeline):
             task = progress.add_task("[green]Evaluating all eval images...", total=num_images)
 
             for camera, batch in self.datamanager.fixed_indices_eval_dataloader:
+                original_camera_to_worlds = camera.camera_to_worlds.clone()
+                camera.camera_to_worlds[0, 0, 3] += 3
+
                 torch.cuda.synchronize()
                 # time this the following line
                 inner_start = time()
@@ -334,10 +337,14 @@ class SplatADPipeline(VanillaPipeline):
                     self._update_actor_fids(
                         actor_fids, actor_edits, camera, batch["image"], dump_img_to_disk, output_path
                     )
+                camera.camera_to_worlds = original_camera_to_worlds
                 progress.advance(task)
 
             task = progress.add_task("[green]Evaluating all eval point clouds...", total=num_lidar)
             for lidar, batch in self.datamanager.fixed_indices_eval_lidar_dataloader:
+                original_lidar_to_worlds = lidar.lidar_to_worlds.clone()
+                lidar.lidar_to_worlds[0, 0, 3] += 3
+
                 torch.cuda.synchronize()
                 inner_start = time()
                 outputs = self.model.get_lidar_outputs(lidar)
@@ -376,6 +383,7 @@ class SplatADPipeline(VanillaPipeline):
                             pred_points_median=pred_points_median.cpu().numpy(),
                             gt_points=gt_points.cpu().numpy(),
                         )
+                lidar.lidar_to_worlds = original_lidar_to_worlds
                 progress.advance(task)
 
         # average the metrics list

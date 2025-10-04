@@ -21,13 +21,16 @@ NeRF implementation that combines many recent advancements.
 from __future__ import annotations
 
 import math
+import os
 import warnings
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Type, Union
 
 import numpy as np
 import torch
 from pytorch_msssim import SSIM
+from torchvision.utils import save_image
 from torch.nn import BCEWithLogitsLoss, Parameter
 from typing_extensions import Literal
 
@@ -247,6 +250,10 @@ class SplatADModelConfig(ADModelConfig):
     """Weight of the depth loss"""
     depth_loss_quantile_threshold: float = 0.95
     """Quantile threshold for the depth loss"""
+    save_images_to_disk: bool = False
+    """Whether to save predicted and ground truth RGB images to disk during evaluation"""
+    image_save_dir: str = "saved_images"
+    """Directory to save RGB images to, relative to the output directory"""
     intensity_lambda: float = 1.0
     """Weight of the intensity loss"""
     ray_drop_lambda: float = 0.1
@@ -297,6 +304,8 @@ class SplatADModel(ADModel):
     ):
         self.seed_points = seed_points
         self.last_size = (1, 1)
+        self._image_counter = 0  # Counter for saving images
+        self._base_dir = kwargs.get('base_dir', None)  # Store base directory for saving images
         super().__init__(*args, **kwargs)
 
     def populate_modules(self):
@@ -383,7 +392,7 @@ class SplatADModel(ADModel):
         self.median_l2 = lambda pred, gt: torch.median((pred - gt) ** 2)
         self.mean_rel_l2 = lambda pred, gt: torch.mean(((pred - gt) / gt) ** 2)
         self.rmse = lambda pred, gt: torch.sqrt(torch.mean((pred - gt) ** 2))
-        self.chamfer_distance = lambda pred, gt: chamfer_distance(pred, gt, 1_000, True)
+        self.chamfer_distance = lambda pred, gt: chamfer_distance(pred, gt, 1_000, True) #
 
         # losses
         self.depth_loss = L1Loss(reduction="none")
@@ -540,6 +549,46 @@ class SplatADModel(ADModel):
             new_shape = (newp,) + old_shape[1:]
             self.gauss_params[name] = torch.nn.Parameter(torch.zeros(new_shape, device=self.device))
         super().load_state_dict(dict, **kwargs)
+
+    def _save_rgb_images(self, gt_rgb: torch.Tensor, pred_rgb: torch.Tensor, step: Optional[int] = None, psnr=None) -> None:
+        """Save ground truth and predicted RGB images to disk.
+        
+        Args:
+            gt_rgb: Ground truth RGB image tensor [H, W, 3]
+            pred_rgb: Predicted RGB image tensor [H, W, 3]
+            step: Optional step number for filename
+        """
+        if not self.config.save_images_to_disk:
+            return
+        # Create output directory
+        if hasattr(self, '_base_dir') and self._base_dir is not None:
+            output_dir = Path(self._base_dir) / self.config.image_save_dir
+        else:
+            # Fallback to current directory
+            output_dir = Path("outputs") / self.config.image_save_dir
+            
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Use step if provided, otherwise use internal counter
+        if step is not None:
+            suffix = f"_{step:06d}"
+        else:
+            suffix = f"_{self._image_counter:06d}"
+            self._image_counter += 1
+        
+        # Convert tensors to [C, H, W] format and ensure they're in [0, 1] range
+        gt_rgb_save = gt_rgb.permute(2, 0, 1).clamp(0, 1)
+        pred_rgb_save = pred_rgb.permute(2, 0, 1).clamp(0, 1)
+        
+        # # Save images
+        # save_image(gt_rgb_save, output_dir / f"gt_rgb{suffix}.png")
+        # save_image(pred_rgb_save, output_dir / f"pred_rgb{suffix}.png")
+        
+        # Also save side-by-side comparison
+        combined = torch.cat([gt_rgb_save, pred_rgb_save], dim=2)  # Concatenate along width
+        if psnr is not None:
+            suffix = suffix + f"_psnr_{psnr:.2f}"
+        save_image(combined, output_dir / f"comparison{suffix}.png")
 
     def create_gauss_param_dict(
         self,
@@ -1227,6 +1276,10 @@ class SplatADModel(ADModel):
         if alpha_sum_until_points is not None:
             out["alpha_sum_until_points"] = alpha_sum_until_points
 
+        # Add time information to outputs
+        # Use the time offsets from raster_pts (which contains the adjusted time offsets)
+        out["time"] = raster_pts[..., 3:4].to(torch.float32)  # shape: [batch, height, width, 1]
+
         return out  # type: ignore
 
     def get_outputs(self, sensor: Union[Cameras, Lidars]) -> Dict[str, Union[torch.Tensor, List]]:
@@ -1334,7 +1387,6 @@ class SplatADModel(ADModel):
                 warnings.warn("GT image and predicted image have different shapes. Cropping GT image to match.")
 
             metrics_dict["psnr"] = self.psnr(predicted_rgb, gt_rgb)
-
             metrics_dict["gaussian_count"] = self.num_points
 
         if "raster_pts" in batch:
@@ -1485,6 +1537,13 @@ class SplatADModel(ADModel):
             metrics_dict.update({"psnr": float(psnr), "ssim": float(ssim), "lpips": float(lpips)})  # type: ignore
 
             images_dict.update({"img": combined_rgb})
+            
+            # Save RGB images to disk if configured
+            if self.config.save_images_to_disk:
+                # Convert back to [H, W, C] format for saving
+                gt_rgb_save = gt_rgb[0].permute(1, 2, 0)
+                pred_rgb_save = predicted_rgb[0].permute(1, 2, 0) 
+                self._save_rgb_images(gt_rgb_save, pred_rgb_save, psnr=psnr)
 
         if "raster_pts" in batch:
             pred, gt = self.filter_lidar_pred_and_gt(outputs, batch, output_point_cloud=True)
@@ -1498,6 +1557,7 @@ class SplatADModel(ADModel):
                 (((pred["ray_drop"].sigmoid() > 0.5) == gt["ray_drop"]) * gt["valid"]).sum() / gt["valid"].sum()
             )
 
+            #
             if pred["point_cloud"].shape[0] > 0 and gt["point_cloud"].shape[0] > 0:
                 metrics_dict["chamfer_distance"] = float(self.chamfer_distance(pred["point_cloud"], gt["point_cloud"]))
 
