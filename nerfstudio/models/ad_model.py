@@ -103,6 +103,7 @@ class ADModel(Model):
         batch["did_return"] = ray_bundle.metadata["did_return"]
 
         outputs = self.get_outputs_for_camera_ray_bundle(ray_bundle)
+        # outputs["time"] -= lidar.times
 
         # add points in local coords to model outputs
         l2w = lidar.lidar_to_worlds[0].to(self.device)

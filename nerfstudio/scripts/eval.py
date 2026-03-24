@@ -47,19 +47,22 @@ class ComputePSNR:
     def main(self) -> None:
         """Main function."""
         config, pipeline, checkpoint_path, _ = eval_setup(self.load_config, update_config_callback=self.update_config)
-        assert self.output_path.suffix == ".json"
+        print("######", str(config.pipeline.datamanager.dataparser.sequence))
+        # assert self.output_path.suffix == ".json"
         if self.render_output_path is not None:
             self.render_output_path.mkdir(parents=True, exist_ok=True)
         metrics_dict = pipeline.get_average_eval_image_metrics(output_path=self.render_output_path, get_std=True)
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
         # Get the output and define the names to save to
         benchmark_info = {
             "experiment_name": config.experiment_name,
             "method_name": config.method_name,
             "checkpoint": str(checkpoint_path),
+            "seq": str(config.pipeline.datamanager.dataparser.sequence),
             "results": metrics_dict,
         }
         # Save output to output file
+        self.output_path = self.output_path / benchmark_info["method_name"] / Path(benchmark_info["seq"]).with_suffix(".json")
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
         self.output_path.write_text(json.dumps(benchmark_info, indent=2), "utf8")
         CONSOLE.print(f"Saved results to: {self.output_path}")
 

@@ -195,6 +195,9 @@ class ADPipeline(VanillaPipeline):
             num_images = len(self.datamanager.fixed_indices_eval_dataloader)
             task = progress.add_task("[green]Evaluating all eval images...", total=num_images)
             for camera, batch in self.datamanager.fixed_indices_eval_dataloader:
+                original_camera_to_worlds = camera.camera_to_worlds.clone()
+                # camera.camera_to_worlds[0, 0, 3] += 3 #
+
                 torch.cuda.synchronize()
                 # time this the following line
                 inner_start = time()
@@ -289,10 +292,15 @@ class ADPipeline(VanillaPipeline):
                     self._update_actor_fids(
                         actor_fids, actor_edits, camera_ray_bundle, batch["image"], dump_img_to_disk, output_path
                     )
+                camera.camera_to_worlds = original_camera_to_worlds
                 progress.advance(task)
+
             num_lidar = len(self.datamanager.fixed_indices_eval_lidar_dataloader)
             task = progress.add_task("[green]Evaluating all eval point clouds...", total=num_lidar)
             for lidar, batch in self.datamanager.fixed_indices_eval_lidar_dataloader:
+                original_lidar_to_worlds = lidar.lidar_to_worlds.clone()
+                # lidar.lidar_to_worlds[0, 0, 3] += 3 #
+
                 torch.cuda.synchronize()
                 inner_start = time()
                 outputs, batch = self.model.get_outputs_for_lidar(lidar, batch=batch)
@@ -303,6 +311,7 @@ class ADPipeline(VanillaPipeline):
                 assert "num_lidar_rays_per_sec" not in metrics_dict
                 metrics_dict["num_lidar_rays_per_sec"] = num_lidar_rays / inference_time_lidar
                 metrics_dict_list.append(metrics_dict)
+                lidar.lidar_to_worlds = original_lidar_to_worlds
                 progress.advance(task)
 
         # average the metrics list

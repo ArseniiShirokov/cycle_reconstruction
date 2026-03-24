@@ -60,9 +60,9 @@ class WoDParserConfig(ADDataParserConfig):
     """Raw dataset path to WOD"""
     parquet_dir: str = "training"
     """Change to validation when some sequence is in validation"""
-    output_folder: Path = Path("/data/dataset/wod/images")
+    output_folder: Path = Path("data/wod/images")
     """Output saving folder for images, by defaut it will be set with wod dataset path."""
-    train_split_fraction: float = 0.5
+    train_split_fraction: float = 1.0
     """The percent of images to use for training. The remaining images are for eval."""
     start_frame: int = 0
     """Start frame"""
@@ -74,8 +74,8 @@ class WoDParserConfig(ADDataParserConfig):
         "FRONT",
         "FRONT_LEFT",
         "FRONT_RIGHT",
-        # "SIDE_LEFT",
-        # "SIDE_RIGHT",
+        "SIDE_LEFT",
+        "SIDE_RIGHT",
     )
     """Which cameras to use."""
     lidars: Tuple[Literal["Top"], ...] = ("Top",)
@@ -262,6 +262,15 @@ class WoD(ADDataParser):
                 continue
             poses = np.array(actor["poses"]) @ rot_minus_90
             timestamps = actor["timestamps"]
+            
+            # Sort by timestamps to ensure monotonic order (required by trajectory interpolation)
+            # This handles cases where Waymo data may have unsorted timestamps
+            if len(timestamps) > 1:
+                timestamps_array = np.array(timestamps)
+                sort_indices = np.argsort(timestamps_array)
+                timestamps = timestamps_array[sort_indices].tolist()
+                poses = poses[sort_indices]
+            
             actor_dimensions = self.objects_id.id2box_dimensions[index]  # (length, width, height)
             lenght, width, height = actor_dimensions.values()
             dims = np.array([width, lenght, height], dtype=np.float32)

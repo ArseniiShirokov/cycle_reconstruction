@@ -16,7 +16,8 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Tuple, Type
+from typing import Dict, List, Literal, Optional, Tuple, Type
+import json
 
 import av2.utils.io as io_utils
 import numpy as np
@@ -176,6 +177,14 @@ class Argoverse2DataParserConfig(ADDataParserConfig):
     output_lidars_separately: bool = True
     """whether to output the two combined lidars as separate instances"""
 
+    # Shifted dataset support (match PandaSet approach)
+    apply_shift: bool = False
+    """Apply a constant translation to all sensor poses (in Nerfstudio world axes x-right, y-forward, z-up)."""
+    ego_shift_xyz: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    """Shift vector added to translations of camera_to_worlds and lidar_to_worlds when apply_shift is True."""
+    shift_world_file: Optional[Path] = None
+    """Path to shift_world.json file containing world coordinates shift. If None, will try to find it automatically."""
+
 
 @dataclass
 class Argoverse2(ADDataParser):
@@ -211,7 +220,9 @@ class Argoverse2(ADDataParser):
                 ego2world = self.av2.get_city_SE3_ego(self.config.sequence, t)
                 cam_extrinsics = pinhole_camera.ego_SE3_cam.transform_matrix.copy()
                 cam_extrinsics[:3, :3] = cam_extrinsics[:3, :3] @ OPENCV_TO_NERFSTUDIO
-                poses.append(ego2world.transform_matrix @ cam_extrinsics)
+                pose = ego2world.transform_matrix @ cam_extrinsics
+                poses.append(pose)
+                
                 # add the camera intrinsics
                 intrinsics.append(pinhole_camera.intrinsics.K)
                 # add the camera height and width, which differ between cameras
@@ -279,8 +290,10 @@ class Argoverse2(ADDataParser):
             ego_pose_up = ego_pose.compose(ego_SE3_up_lidar)
             ego_pose_down = ego_pose.compose(ego_SE3_down_lidar)
             # add the pose
-            poses_up.append(ego_pose_up.transform_matrix)
-            poses_down.append(ego_pose_down.transform_matrix)
+            pose_up = ego_pose_up.transform_matrix
+            pose_down = ego_pose_down.transform_matrix
+            poses_up.append(pose_up)
+            poses_down.append(pose_down)
             idxs.append(0)  # add the lidar index (there is only one so lets use 0)
             times.append(t / 1e9)  # convert to seconds
 
@@ -335,6 +348,7 @@ class Argoverse2(ADDataParser):
             # transform the points back to the sensor position
             xyz_up = sweep.ego_SE3_up_lidar.inverse().transform_point_cloud(sweep.xyz[laser_number < 32])
             xyz_down = sweep.ego_SE3_down_lidar.inverse().transform_point_cloud(sweep.xyz[laser_number >= 32])
+
             # normalize the intensity values to be in [0, 1]
             intensity = sweep.intensity / MAX_REFLECTANCE_VALUE
             # Add relative time
@@ -388,6 +402,37 @@ class Argoverse2(ADDataParser):
             )
             all_times = torch.from_numpy(log_pose_df["timestamp_ns"].to_numpy() / 1e9)
 
+            # Apply shift to world poses if apply_shift is enabled
+            if self.config.apply_shift:
+                shift_world = None
+                # Try to load shift from file
+                if self.config.shift_world_file is not None and self.config.shift_world_file.exists():
+                    with open(self.config.shift_world_file, "r", encoding="UTF-8") as f:
+                        shift_data = json.load(f)
+                        shift_world = np.array(shift_data["shift_world"], dtype=np.float32)
+                else:
+                    # Try to find shift file automatically in common locations
+                    # Look in data/sensor/{split}/{sequence}/shift_world.json
+                    possible_paths = [
+                        self.config.data / "sensor" / self.config.split / self.config.sequence / "shift_world.json",
+                        Path("data/argoverse2") / "sensor" / self.config.split / self.config.sequence / "shift_world.json",
+                    ]
+                    for shift_path in possible_paths:
+                        if shift_path.exists():
+                            with open(shift_path, "r", encoding="UTF-8") as f:
+                                shift_data = json.load(f)
+                                shift_world = np.array(shift_data["shift_world"], dtype=np.float32)
+                            break
+                
+                if shift_world is not None:
+                    # Apply shift to world poses for missing points computation
+                    shift_tensor = torch.tensor(shift_world, dtype=torch.float32)
+                    all_lup2w[..., :3, 3] += shift_tensor
+                    all_ldown2w[..., :3, 3] += shift_tensor
+                    # Also shift the lidar poses used in the loop
+                    poses_up[..., :3, 3] += shift_tensor
+                    poses_down[..., :3, 3] += shift_tensor
+            
             for i, (pc_up, pc_down, lup2w, ldown2w, time) in enumerate(
                 zip(point_clouds_up, point_clouds_down, poses_up, poses_down, times)
             ):
@@ -548,6 +593,18 @@ class Argoverse2(ADDataParser):
 
         assert self.config.sequence in self.av2.get_log_ids(), f"Sequence {self.config.sequence} not found in dataset."
         out = super()._generate_dataparser_outputs(split=split)
+
+        # Apply shift in final NerfStudio world frame (after _adjust_poses transformation)
+        if self.config.apply_shift and str(self.config.data).find("/workspace") == -1:
+            shift_vector = np.array(self.config.ego_shift_xyz, dtype=np.float32)
+            shift_tensor = torch.tensor(shift_vector, dtype=torch.float32)
+            out.cameras.camera_to_worlds[..., :3, 3] += shift_tensor
+            out.metadata["lidars"].lidar_to_worlds[..., :3, 3] += shift_tensor
+            # Store shift in metadata for use in pipeline
+            out.metadata["ego_shift_xyz"] = shift_tensor
+            out.metadata["apply_shift"] = True
+        else:
+            out.metadata["apply_shift"] = False
 
         del self.av2
         return out

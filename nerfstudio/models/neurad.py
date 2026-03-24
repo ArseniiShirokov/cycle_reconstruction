@@ -672,6 +672,8 @@ class NeuRADModel(ADModel):
         if ray_drop_logit is not None:
             outputs["ray_drop_logits"] = ray_drop_logit.view(*output_size, -1)
             outputs["ray_drop_prob"] = ray_drop_logit.view(*output_size, -1).sigmoid()
+        
+        outputs["time"] = camera_ray_bundle.times
         return outputs
 
     def _compute_is_close_to_lidar(self, *all_ray_samples: RaySamples) -> None:

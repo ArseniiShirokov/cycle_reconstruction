@@ -235,6 +235,7 @@ class ADDataParser(DataParser):
                 "lidars": lidars,
                 "point_clouds": [pc.float() for pc in point_clouds],  # Ensure they are float32
                 "point_clouds_times": point_clouds_times,
+                "pc_filenames": pc_filenames,
                 "trajectories": trajectories,
                 "lane_shift_sign": self._get_lane_shift_sign(self.config.sequence),
                 "sensor_idx_to_name": sensor_idx_to_name,

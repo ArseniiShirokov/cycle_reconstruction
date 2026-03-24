@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import json
 import os
 import time
 from collections import defaultdict
@@ -30,6 +31,15 @@ from threading import Lock
 from typing import DefaultDict, Dict, List, Literal, Optional, Tuple, Type, cast
 
 import torch
+
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # Use non-interactive backend
+    import matplotlib.pyplot as plt  # type: ignore
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+    plt = None  # type: ignore
 from rich import box, style
 from rich.panel import Panel
 from rich.table import Table
@@ -197,6 +207,8 @@ class Trainer:
         self.early_stopping_tracker = self.config.early_stopping_tracker.setup()
 
         self.viewer_state = None
+        # Track learning rate history for visualization
+        self.lr_history: Dict[str, List[Tuple[int, float]]] = defaultdict(list)
 
     def setup(self, test_mode: Literal["test", "val", "inference"] = "val") -> None:
         """Setup the Trainer by calling other setup functions.
@@ -311,6 +323,9 @@ class Trainer:
                         # time the forward pass
                         loss, loss_dict, metrics_dict = self.train_iteration(step)
 
+                        # Track learning rate for every iteration
+                        self._track_lr_at_step(step)
+
                         # training callbacks after the training iteration
                         for callback in self.callbacks:
                             callback.run_callback_at_location(
@@ -360,6 +375,9 @@ class Trainer:
 
         # save checkpoint at the end of training
         self.save_checkpoint(step)
+
+        # Final save of learning rate history
+        self._save_lr_history()
 
         # write out any remaining events (e.g., total train time)
         writer.write_out_storage()
@@ -509,6 +527,19 @@ class Trainer:
         if self.checkpoint_saving_tracker.did_degrade():
             return
         self.checkpoint_saving_tracker.reset_latest()  # we only want to save the best once
+        
+        # Extract current learning rates from all optimizers
+        current_lrs = {}
+        for param_group_name, optimizer in self.optimizers.optimizers.items():
+            # Handle multiple param groups per optimizer
+            if len(optimizer.param_groups) > 1:
+                for i, param_group in enumerate(optimizer.param_groups):
+                    lr_key = f"{param_group_name}_{i}"
+                    current_lrs[lr_key] = float(param_group.get("lr", 0.0))
+            else:
+                # Single param group
+                current_lrs[param_group_name] = float(optimizer.param_groups[0].get("lr", 0.0))
+        
         # save the checkpoint
         ckpt_path: Path = self.checkpoint_dir / f"step-{step:09d}.ckpt"
         torch.save(
@@ -522,15 +553,139 @@ class Trainer:
                 "optimizers": {k: v.state_dict() for (k, v) in self.optimizers.optimizers.items()},
                 "schedulers": {k: v.state_dict() for (k, v) in self.optimizers.schedulers.items()},
                 "scalers": self.grad_scaler.state_dict(),
+                "learning_rates": current_lrs,  # Save current LR with checkpoint
             },
             ckpt_path,
         )
+        
+        # Save LR history to JSON file
+        self._save_lr_history()
+        
+        # Save LR plot for this checkpoint
+        # self._save_lr_plot_for_checkpoint(step)
+        
+        # Save test images before checkpoint (if pipeline supports it)
+        # self._save_test_images_for_checkpoint(step)
+        
         # possibly delete old checkpoints
         if self.config.save_only_latest_checkpoint:
             # delete everything else in the checkpoint folder
             for f in self.checkpoint_dir.glob("*"):
                 if f != ckpt_path:
                     f.unlink()
+
+    def _track_lr_at_step(self, step: int) -> None:
+        """Track learning rate at every training iteration.
+        
+        Args:
+            step: Current training step
+        """
+        if not hasattr(self, "lr_history"):
+            self.lr_history = defaultdict(list)
+        
+        # Extract current learning rates from all optimizers
+        current_lrs = {}
+        for param_group_name, optimizer in self.optimizers.optimizers.items():
+            # Handle multiple param groups per optimizer
+            if len(optimizer.param_groups) > 1:
+                for i, param_group in enumerate(optimizer.param_groups):
+                    lr_key = f"{param_group_name}_{i}"
+                    current_lrs[lr_key] = float(param_group.get("lr", 0.0))
+            else:
+                # Single param group
+                current_lrs[param_group_name] = float(optimizer.param_groups[0].get("lr", 0.0))
+        
+        # Track learning rate history for this step
+        for param_group_name, lr in current_lrs.items():
+            self.lr_history[param_group_name].append((step, float(lr)))
+
+    def _save_lr_history(self) -> None:
+        """Save learning rate history to a JSON file for visualization."""
+        if not hasattr(self, "lr_history") or not self.lr_history:
+            return
+        
+        # Prepare data for JSON (convert tuples to lists)
+        lr_data = {
+            param_group: {
+                "steps": [step for step, _ in history],
+                "learning_rates": [lr for _, lr in history]
+            }
+            for param_group, history in self.lr_history.items()
+        }
+        
+        # Save to JSON file
+        lr_history_path = self.base_dir / "learning_rate_history.json"
+        with open(lr_history_path, "w") as f:
+            json.dump(lr_data, f, indent=2)
+
+    def _save_lr_plot_for_checkpoint(self, step: int) -> None:
+        """Generate and save LR plot for the current checkpoint.
+        
+        Args:
+            step: Current training step
+        """
+        if not HAS_MATPLOTLIB or not hasattr(self, "lr_history") or not self.lr_history or plt is None:
+            return
+        
+        try:
+            # Type check to ensure plt is not None
+            if not HAS_MATPLOTLIB:
+                return
+                
+            import matplotlib.pyplot as plotting_plt
+            
+            # Create a 4x3 grid of subplots (12 parameter groups)
+            fig, axes = plotting_plt.subplots(4, 3, figsize=(18, 16))
+            axes = axes.flatten()
+            
+            # Plot each parameter group in its own subplot
+            for idx, (param_group, history) in enumerate(self.lr_history.items()):
+                ax = axes[idx]
+                steps = [s for s, _ in history]
+                lrs = [lr for _, lr in history]
+                ax.plot(steps, lrs, linewidth=2, marker='o', markersize=1, label=param_group)
+                
+                # Configure subplot
+                ax.set_title(param_group, fontsize=11, fontweight='bold')
+                ax.set_xlabel('Step', fontsize=9)
+                ax.set_ylabel('LR', fontsize=9)
+                ax.grid(True, alpha=0.3)
+                ax.set_xlim(left=0)
+                
+                # Use log scale if LRs span orders of magnitude
+                if lrs and min(lrs) > 0 and max(lrs) / min(lrs) > 100:
+                    ax.set_yscale('log')
+            
+            # Hide unused subplots
+            for idx in range(len(self.lr_history), 12):
+                axes[idx].set_visible(False)
+            
+            # Add overall title
+            fig.suptitle(f'Learning Rate Curves for All Parameter Groups (Step {step})', 
+                        fontsize=14, fontweight='bold', y=0.995)
+            
+            plotting_plt.tight_layout(rect=[0, 0, 1, 0.98])
+            
+            # Save plot to test_images directory with the same structure as images
+            test_images_dir = self.base_dir / "test_images"
+            checkpoint_dir = test_images_dir / f"step-{step:09d}"
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            
+            plot_path = checkpoint_dir / "learning_rate_curve.png"
+            plotting_plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plotting_plt.close(fig)
+            
+        except Exception as e:
+            CONSOLE.print(f"[yellow]Warning: Failed to save LR plot: {e}")
+
+    def _save_test_images_for_checkpoint(self, step: int) -> None:
+        """Save test images for a checkpoint if the pipeline supports it."""
+        if hasattr(self.pipeline, "save_test_images_for_checkpoint"):
+            test_images_dir = self.base_dir / "test_images"
+            try:
+                self.pipeline.save_test_images_for_checkpoint(step, test_images_dir)
+            except Exception as e:
+                CONSOLE.print(f"[yellow]Warning: Failed to save test images: {e}")
 
     @profiler.time_function
     def train_iteration(self, step: int) -> TRAIN_INTERATION_OUTPUT:

@@ -39,7 +39,7 @@ dataparsers = {
 }
 
 try:
-    from nerfstudio.data.dataparsers.waymo_dataparser import WoDParserConfig
+    from nerfstudio.data.dataparsers.wod_dataparser import WoDParserConfig
 
     dataparsers["wod-data"] = WoDParserConfig()
 except ImportError:

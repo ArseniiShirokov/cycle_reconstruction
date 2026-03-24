@@ -45,6 +45,7 @@ from nerfstudio.data.datamanagers.parallel_datamanager import ParallelDataManage
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.pipelines.base_pipeline import VanillaPipeline, VanillaPipelineConfig
 from nerfstudio.utils import profiler
+from nerfstudio.utils.rich_utils import CONSOLE
 
 
 @dataclass
@@ -205,6 +206,88 @@ class SplatADPipeline(VanillaPipeline):
         return metrics_dict, images_dict
 
     @profiler.time_function
+    def save_test_images_for_checkpoint(self, step: int, output_dir: Path):
+        """Render and save all test images at a specific checkpoint step.
+        
+        Args:
+            step: current training step
+            output_dir: directory to save rendered images, structure: output_dir/step/cam_name/timestamp.png
+        """
+        self.eval()
+        
+        # Create output directory for this checkpoint
+        checkpoint_dir = output_dir / f"step-{step:09d}"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        
+        num_images = len(self.datamanager.fixed_indices_eval_dataloader)
+        CONSOLE.print(f"[green]Rendering {num_images} test images for checkpoint at step {step}...")
+        
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TimeElapsedColumn(),
+            MofNCompleteColumn(),
+            transient=True,
+        ) as progress:
+            task = progress.add_task("[green]Rendering test images...", total=num_images)
+            
+            for idx, (camera, batch) in enumerate(self.datamanager.fixed_indices_eval_dataloader):
+                try:
+                    # Render the image
+                    outputs = self.model.get_outputs_for_camera(camera)
+                    
+                    # Get metadata for filename
+                    sensor_idx = camera.metadata.get("sensor_idxs", [0])[0].item() if camera.metadata and "sensor_idxs" in camera.metadata else 0
+                    if "image_idx" in batch:
+                        frame_idx = int(batch["image_idx"].item() if hasattr(batch["image_idx"], 'item') else batch["image_idx"])
+                    else:
+                        frame_idx = idx
+                    
+                    # Get camera name from sensor_idx_to_name mapping
+                    if hasattr(self.datamanager, 'train_dataparser_outputs') and self.datamanager.train_dataparser_outputs and 'sensor_idx_to_name' in self.datamanager.train_dataparser_outputs.metadata:
+                        sensor_idx_to_name = self.datamanager.train_dataparser_outputs.metadata['sensor_idx_to_name']
+                        cam_name = sensor_idx_to_name.get(sensor_idx, f"cam_{sensor_idx}")
+                    else:
+                        cam_name = f"cam_{sensor_idx}"
+                    
+                    # Create subdirectory for this camera
+                    cam_dir = checkpoint_dir / str(cam_name)
+                    cam_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    # Save rendered image with timestamp
+                    rendered_rgb = outputs.get("rgb")
+                    if rendered_rgb is not None and isinstance(rendered_rgb, torch.Tensor):
+                        # Convert to numpy
+                        rendered_rgb = rendered_rgb.detach().cpu()
+                        if rendered_rgb.max() <= 1.0:
+                            rendered_rgb = rendered_rgb * 255
+                        rendered_rgb = rendered_rgb.byte().numpy()
+                        
+                        # Handle different shapes
+                        if len(rendered_rgb.shape) == 3:  # (H, W, C)
+                            img = Image.fromarray(rendered_rgb)
+                        elif len(rendered_rgb.shape) == 2:  # (H, W) - grayscale
+                            img = Image.fromarray(rendered_rgb, mode='L')
+                        else:
+                            CONSOLE.print(f"[yellow]Warning: Unexpected rgb shape: {rendered_rgb.shape}")
+                            continue
+                        
+                        img_path = cam_dir / f"{frame_idx:02d}.png"
+                        img.save(img_path)
+                    else:
+                        CONSOLE.print(f"[yellow]Warning: No rgb output or invalid type for frame {frame_idx}")
+                        
+                except Exception as e:
+                    CONSOLE.print(f"[yellow]Warning: Failed to save image for camera: {e}")
+                    import traceback
+                    CONSOLE.print(traceback.format_exc())
+                
+                progress.advance(task)
+        
+        CONSOLE.print(f"[green]Saved test images to: {checkpoint_dir}")
+        self.train()
+
+    @profiler.time_function
     def get_average_eval_image_metrics(
         self,
         step: Optional[int] = None,
@@ -261,7 +344,15 @@ class SplatADPipeline(VanillaPipeline):
 
             for camera, batch in self.datamanager.fixed_indices_eval_dataloader:
                 original_camera_to_worlds = camera.camera_to_worlds.clone()
-                camera.camera_to_worlds[0, 0, 3] += 3
+                # Apply -shift from dataparser when apply_shift is True
+                if (
+                    hasattr(self.datamanager, "train_dataparser_outputs")
+                    and self.datamanager.train_dataparser_outputs is not None
+                    and self.datamanager.train_dataparser_outputs.metadata.get("apply_shift", False)
+                ):
+                    shift = self.datamanager.train_dataparser_outputs.metadata["ego_shift_xyz"]
+                    shift = shift.to(camera.camera_to_worlds.device)
+                    camera.camera_to_worlds[0, :3, 3] += -shift
 
                 torch.cuda.synchronize()
                 # time this the following line
@@ -343,7 +434,15 @@ class SplatADPipeline(VanillaPipeline):
             task = progress.add_task("[green]Evaluating all eval point clouds...", total=num_lidar)
             for lidar, batch in self.datamanager.fixed_indices_eval_lidar_dataloader:
                 original_lidar_to_worlds = lidar.lidar_to_worlds.clone()
-                lidar.lidar_to_worlds[0, 0, 3] += 3
+                # Apply -shift from dataparser when apply_shift is True
+                if (
+                    hasattr(self.datamanager, "train_dataparser_outputs")
+                    and self.datamanager.train_dataparser_outputs is not None
+                    and self.datamanager.train_dataparser_outputs.metadata.get("apply_shift", False)
+                ):
+                    shift = self.datamanager.train_dataparser_outputs.metadata["ego_shift_xyz"]
+                    shift = shift.to(lidar.lidar_to_worlds.device)
+                    lidar.lidar_to_worlds[0, :3, 3] += -shift
 
                 torch.cuda.synchronize()
                 inner_start = time()

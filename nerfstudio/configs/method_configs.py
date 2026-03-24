@@ -324,6 +324,7 @@ method_configs["splatad"] = TrainerConfig(
     steps_per_eval_all_images=2500,
     max_num_iterations=30001,
     mixed_precision=False,
+    save_only_latest_checkpoint=False,
     pipeline=SplatADPipelineConfig(
         calc_fid_steps=(30000,),
         datamanager=FullImageLidarDatamanagerConfig(
