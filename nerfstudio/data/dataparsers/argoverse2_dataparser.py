@@ -166,6 +166,9 @@ class Argoverse2DataParserConfig(ADDataParserConfig):
     """interval between annotations in seconds"""
     split: str = "val"
     """what split to use. options are: train, val, test, mini, mini_val, mini_test"""
+    scene_dir: Optional[Path] = None
+    """Direct path to a scene folder (bypasses data/sensor/split layout).
+    A symlink is created so AV2SensorDataLoader can discover the log by UUID."""
     add_missing_points: bool = True
     """whether to add missing points to the point clouds"""
     lidar_elevation_mapping: Dict[str, Dict[int, float]] = field(default_factory=lambda: AV2_ELEVATION_MAPPING)
@@ -417,6 +420,8 @@ class Argoverse2(ADDataParser):
                         self.config.data / "sensor" / self.config.split / self.config.sequence / "shift_world.json",
                         Path("data/argoverse2") / "sensor" / self.config.split / self.config.sequence / "shift_world.json",
                     ]
+                    if self.config.scene_dir is not None:
+                        possible_paths.insert(0, Path(self.config.scene_dir) / "shift_world.json")
                     for shift_path in possible_paths:
                         if shift_path.exists():
                             with open(shift_path, "r", encoding="UTF-8") as f:
@@ -588,19 +593,33 @@ class Argoverse2(ADDataParser):
         return trajs
 
     def _generate_dataparser_outputs(self, split="train"):
-        datapath = self.config.data / "sensor" / self.config.split
+        if self.config.scene_dir is not None:
+            scene_dir = Path(self.config.scene_dir).resolve()
+            link_parent = scene_dir.parent / ".av2_links"
+            link_parent.mkdir(parents=True, exist_ok=True)
+            link_path = link_parent / self.config.sequence
+            if not link_path.exists():
+                link_path.symlink_to(scene_dir)
+            datapath = link_parent
+        else:
+            datapath = self.config.data / "sensor" / self.config.split
         self.av2 = AV2SensorDataLoader(datapath, datapath)
 
         assert self.config.sequence in self.av2.get_log_ids(), f"Sequence {self.config.sequence} not found in dataset."
         out = super()._generate_dataparser_outputs(split=split)
 
-        # Apply shift in final NerfStudio world frame (after _adjust_poses transformation)
         if self.config.apply_shift and str(self.config.data).find("/workspace") == -1:
             shift_vector = np.array(self.config.ego_shift_xyz, dtype=np.float32)
             shift_tensor = torch.tensor(shift_vector, dtype=torch.float32)
-            out.cameras.camera_to_worlds[..., :3, 3] += shift_tensor
-            out.metadata["lidars"].lidar_to_worlds[..., :3, 3] += shift_tensor
-            # Store shift in metadata for use in pipeline
+
+            c2w = out.cameras.camera_to_worlds.clone()
+            c2w[..., :3, 3] += shift_tensor
+            out.cameras.camera_to_worlds = c2w
+
+            l2w = out.metadata["lidars"].lidar_to_worlds.clone()
+            l2w[..., :3, 3] += shift_tensor
+            out.metadata["lidars"].lidar_to_worlds = l2w
+
             out.metadata["ego_shift_xyz"] = shift_tensor
             out.metadata["apply_shift"] = True
         else:
