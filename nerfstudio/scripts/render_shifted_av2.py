@@ -261,7 +261,9 @@ class ShiftedDatasetRender(BaseRender):
                 else dataset.cameras.width
             )
             
-            dataset.cameras.camera_to_worlds[..., :3, 3] += torch.tensor(self.shift, dtype=torch.float32)
+            c2w = dataset.cameras.camera_to_worlds.clone()
+            c2w[..., :3, 3] += torch.tensor(self.shift, dtype=torch.float32)
+            dataset.cameras.camera_to_worlds = c2w
 
             dataloader = FixedIndicesEvalDataloader(
                 dataset=dataset,
@@ -331,9 +333,9 @@ class ShiftedDatasetRender(BaseRender):
                         batch["image"] = batch["image"][..., : self.output_width, :]
                         outputs["rgb"] = outputs["rgb"][..., : self.output_width, :]
 
-                    # Only save RGB output
+                    # Predicted RGB (model output)
                     output_image = outputs["rgb"]
-                    
+
                     # Map to color space / numpy
                     output_image = (
                         colormaps.apply_colormap(
@@ -356,7 +358,7 @@ class ShiftedDatasetRender(BaseRender):
                         else output_image.shape[1]
                     )
                     output_image = output_image[:height, :width]
-                    
+
                     # Save in AV2 format: target_root/sensor/{split}/{log_id}/sensors/cameras/{camera_name}/{filename}.jpg
                     output_path = scene_root / "sensors" / "cameras" / camera_name / f"{filename}.jpg"
                     output_path.parent.mkdir(exist_ok=True, parents=True)
@@ -366,6 +368,22 @@ class ShiftedDatasetRender(BaseRender):
                         fmt="jpeg",
                         quality=self.jpeg_quality,
                     )
+
+                    # GT camera image (dataset JPEG) under gt/<camera_name>/ — same stem as rgb
+                    if "image" in batch and batch["image"] is not None:
+                        gt_t = batch["image"]
+                        if gt_t.dim() == 3 and gt_t.shape[0] == 3:
+                            gt_t = gt_t.permute(1, 2, 0)
+                        gt_np = gt_t.clamp(0.0, 1.0).float().detach().cpu().numpy()
+                        gt_np = gt_np[:height, :width]
+                        gt_path = scene_root / "gt" / camera_name / f"{filename}.jpg"
+                        gt_path.parent.mkdir(parents=True, exist_ok=True)
+                        media.write_image(
+                            gt_path,
+                            gt_np,
+                            fmt="jpeg",
+                            quality=self.jpeg_quality,
+                        )
 
             if self.render_point_clouds:
                 with Progress(
@@ -646,14 +664,14 @@ class ShiftedDatasetRender(BaseRender):
                                 if sweep_time in sweep_file_paths:
                                     del sweep_file_paths[sweep_time]
 
-                                if vis_flag:
-                                    plot_lidar_points(
-                                        gt_point_cloud, vis_gt_output_path / f"gt-lidar_{lidar_name}.png"
-                                    )
-                                    plot_lidar_points(
-                                        xyz_cat, vis_output_path / f"lidar_{lidar_name}.png"
-                                    )
-                                    vis_flag = False
+                                # if vis_flag:
+                                #     plot_lidar_points(
+                                #         gt_point_cloud, vis_gt_output_path / f"gt-lidar_{lidar_name}.png"
+                                #     )
+                                #     plot_lidar_points(
+                                #         xyz_cat, vis_output_path / f"lidar_{lidar_name}.png"
+                                #     )
+                                #     vis_flag = False
 
                             # import numpy as np
                             # np.save(output_path / lidar_name, median_point_cloud.cpu().numpy())

@@ -6,11 +6,12 @@ set -e
 SEQ="${SEQ:-05fa5048-f355-3274-b565-c0ddc547b315}"
 SHIFT="${SHIFT:--3.0 0.0 0.0}"
 GPU="${GPU:-0}"
+SPLATAD_NUM_ITER="${SPLATAD_NUM_ITER:-30001}"
 
 # Repo data layout:
 #   data/01_spatad_cycle/<config_id>/raw/       ← original AV2 scene (scene_dir)
 #   data/01_spatad_cycle/<config_id>/rendered/   ← shifted scene output
-#   data/01_spatad_cycle/<config_id>/pairs/      ← gt/ + corrupted/ (post-cycle renders)
+#   data/01_spatad_cycle/<config_id>/pairs/      ← gt/ (from shifted/gt) + corrupted/ (reverse-shift render)
 REPO_DATA="${REPO_DATA:-../data/01_spatad_cycle}"
 CONFIG_ID="${CONFIG_ID:-scene_05}"
 
@@ -39,6 +40,7 @@ echo "NS outputs:     $NS_OUTPUT_DIR"
 echo "Shift:          $SHIFT"
 echo "Reverse shift:  $REVERSE_SHIFT  (Step 5: undo cycle apply_shift → GT pose)"
 echo "GPU:            $GPU"
+echo "SplatAD iters:  $SPLATAD_NUM_ITER"
 echo "=============================================="
 
 # -------------------------------------------------------
@@ -48,9 +50,11 @@ echo "=============================================="
 # -------------------------------------------------------
 echo ""
 echo ">>> STEP 1: Training SplatAD on original AV2 scene (full split) ..."
-CUDA_VISIBLE_DEVICES=$GPU python nerfstudio/scripts/train.py splatad \
+python nerfstudio/scripts/train.py splatad \
     --experiment_name="full_av2_${CONFIG_ID}" \
     --output-dir "$NS_OUTPUT_DIR" \
+    --max-num-iterations "$SPLATAD_NUM_ITER" \
+    --pipeline.model.max-steps "$SPLATAD_NUM_ITER" \
     argoverse2-data \
     --sequence "$SEQ" \
     --scene_dir "$RAW_DIR" \
@@ -65,13 +69,13 @@ echo "Step 1 config: $STEP1_CONFIG"
 # -------------------------------------------------------
 echo ""
 echo ">>> STEP 2: Rendering shifted scene ..."
-CUDA_VISIBLE_DEVICES=$GPU python nerfstudio/scripts/render_shifted_av2.py \
+python nerfstudio/scripts/render_shifted_av2.py \
     --load-config "$STEP1_CONFIG" \
     --shift $SHIFT \
     --render_point_clouds True \
     --pose_source train \
     --original_data_root "$RAW_DIR" \
-    --target_data_root "$SHIFTED_TARGET"
+    --target_data_root "$SHIFTED_TARGET" \
 
 # -------------------------------------------------------
 # STEP 3: Copy metadata from raw AV2 to shifted scene dir
@@ -96,9 +100,11 @@ echo "Metadata copied to $SHIFTED_SCENE"
 # -------------------------------------------------------
 echo ""
 echo ">>> STEP 4: Training SplatAD on shifted data (cycle) ..."
-CUDA_VISIBLE_DEVICES=$GPU python nerfstudio/scripts/train.py splatad \
+python nerfstudio/scripts/train.py splatad \
     --experiment_name="cycle_av2_${CONFIG_ID}" \
     --output-dir "$NS_OUTPUT_DIR" \
+    --max-num-iterations "$SPLATAD_NUM_ITER" \
+    --pipeline.model.max-steps "$SPLATAD_NUM_ITER" \
     argoverse2-data \
     --sequence "$SEQ" \
     --scene_dir "$SHIFTED_SCENE" \
@@ -117,13 +123,13 @@ echo "Step 4 config: $STEP4_CONFIG"
 # -------------------------------------------------------
 echo ""
 echo ">>> STEP 5: Rendering reverse-shifted scene (GT pose) ..."
-CUDA_VISIBLE_DEVICES=$GPU python nerfstudio/scripts/render_shifted_av2.py \
+python nerfstudio/scripts/render_shifted_av2.py \
     --load-config "$STEP4_CONFIG" \
     --shift $REVERSE_SHIFT \
     --render_point_clouds False \
     --pose_source train \
     --original_data_root "$SHIFTED_SCENE" \
-    --target_data_root "$REVERSE_TARGET"
+    --target_data_root "$REVERSE_TARGET" \
 
 # -------------------------------------------------------
 # Copy results to repo rendered/ dir
@@ -135,7 +141,7 @@ mkdir -p "$RENDERED_DIR"
 cp -r "$SHIFTED_SCENE/sensors/cameras/"* "$RENDERED_DIR/" 2>/dev/null || true
 
 # -------------------------------------------------------
-# STEP 6: Pairs for training: gt (raw) + corrupted (cycle output from reverse_shifted/ render tree)
+# STEP 6: Pairs for training: gt from render_shifted_av2 (SHIFTED_SCENE/gt/<cam>/...) + corrupted
 # -------------------------------------------------------
 echo ""
 echo ">>> STEP 6: Creating pairs (gt + corrupted) ..."
@@ -146,15 +152,18 @@ CORRUPTED_PAIRS="$PAIRS_DIR/corrupted"
 rm -rf "$PAIRS_DIR"
 mkdir -p "$GT_PAIRS" "$CORRUPTED_PAIRS"
 
-for cam_dir in "$RAW_DIR"/sensors/cameras/*/; do
+for cam_dir in "$REVERSE_SCENE/sensors/cameras/"*/; do
+    [ -d "$cam_dir" ] || continue
     cam_name=$(basename "$cam_dir")
     mkdir -p "$GT_PAIRS/$cam_name" "$CORRUPTED_PAIRS/$cam_name"
-    for img in "$cam_dir"*.jpg; do
-        [ -f "$img" ] || continue
-        fname=$(basename "$img")
-        cp "$img" "$GT_PAIRS/$cam_name/$fname"
-        reverse_img="$REVERSE_SCENE/sensors/cameras/$cam_name/$fname"
-        [ -f "$reverse_img" ] && cp "$reverse_img" "$CORRUPTED_PAIRS/$cam_name/$fname"
+    for corrupt in "$cam_dir"*.jpg; do
+        [ -f "$corrupt" ] || continue
+        fname=$(basename "$corrupt")
+        gt_src="$SHIFTED_SCENE/gt/$cam_name/$fname"
+        if [ -f "$gt_src" ]; then
+            cp "$gt_src" "$GT_PAIRS/$cam_name/$fname"
+            cp "$corrupt" "$CORRUPTED_PAIRS/$cam_name/$fname"
+        fi
     done
 done
 
@@ -166,7 +175,6 @@ echo ">>> STEP 7: Generating comparison video ..."
 VIDEO_HEIGHT="${VIDEO_HEIGHT:-480}"
 
 python3 nerfstudio/scripts/generate_comparison_video.py \
-    --gt-root "$RAW_DIR" \
     --shifted-root "$SHIFTED_SCENE" \
     --reverse-root "$REVERSE_SCENE" \
     --output-dir "$SCENE_ROOT" \
@@ -174,7 +182,7 @@ python3 nerfstudio/scripts/generate_comparison_video.py \
 
 echo ""
 echo "=== Pipeline complete ==="
-echo "GT images:              $RAW_DIR/sensors/cameras/"
+echo "GT (comparison & pairs): $SHIFTED_SCENE/gt/"
 echo "Shifted images:         $SHIFTED_SCENE/sensors/cameras/"
 echo "Reverse-shifted images: $REVERSE_SCENE/sensors/cameras/"
 echo "Rendered (repo dir):    $RENDERED_DIR/"
