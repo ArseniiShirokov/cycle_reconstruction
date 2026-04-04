@@ -15,7 +15,9 @@
 
 #!/usr/bin/env python
 """
-render.py
+Argoverse 2 shifted render for SplatAD checkpoints (``get_lidar_outputs`` + AV2 camera/lidar layout).
+
+See ``render_shifted_neurad_av2.py`` for NeuRAD (``get_outputs_for_lidar``).
 """
 
 from __future__ import annotations

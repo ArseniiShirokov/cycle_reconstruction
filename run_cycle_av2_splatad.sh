@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+# AV2 cycle reconstruction: train + render pipeline using SplatAD (see also run_cycle_av2_neurad.sh).
 
 # === CONFIGURATION ===
 # Sequence UUID (must match the downloaded scene)
@@ -22,7 +23,7 @@ RAW_DIR="$SCENE_ROOT/raw"
 NS_OUTPUT_DIR="$SCENE_ROOT/logs/nerfstudio"
 mkdir -p "$NS_OUTPUT_DIR"
 
-# render_shifted_av2.py writes to: <target_root>/sensor/<split>/<log_id>/...
+# render_shifted_splatad_av2.py writes to: <target_root>/sensor/<split>/<log_id>/...
 # We use intermediate dirs so scene_dir can point at the actual scene folder.
 SHIFTED_TARGET="$SCENE_ROOT/shifted"
 SHIFTED_SCENE="$SHIFTED_TARGET/sensor/train/$SEQ"
@@ -69,7 +70,7 @@ echo "Step 1 config: $STEP1_CONFIG"
 # -------------------------------------------------------
 echo ""
 echo ">>> STEP 2: Rendering shifted scene ..."
-python nerfstudio/scripts/render_shifted_av2.py \
+python nerfstudio/scripts/render_shifted_splatad_av2.py \
     --load-config "$STEP1_CONFIG" \
     --shift $SHIFT \
     --render_point_clouds True \
@@ -119,11 +120,11 @@ echo "Step 4 config: $STEP4_CONFIG"
 # -------------------------------------------------------
 # STEP 5: Render back at GT pose (reverse shift)
 #         Cycle checkpoint keeps apply_shift=True: dataset cameras = M(P)+SHIFT.
-#         render_shifted_av2 adds REVERSE_SHIFT=-SHIFT → M(P), matching raw GT.
+#         render_shifted_splatad_av2 adds REVERSE_SHIFT=-SHIFT → M(P), matching raw GT.
 # -------------------------------------------------------
 echo ""
 echo ">>> STEP 5: Rendering reverse-shifted scene (GT pose) ..."
-python nerfstudio/scripts/render_shifted_av2.py \
+python nerfstudio/scripts/render_shifted_splatad_av2.py \
     --load-config "$STEP4_CONFIG" \
     --shift $REVERSE_SHIFT \
     --render_point_clouds False \
@@ -141,7 +142,7 @@ mkdir -p "$RENDERED_DIR"
 cp -r "$SHIFTED_SCENE/sensors/cameras/"* "$RENDERED_DIR/" 2>/dev/null || true
 
 # -------------------------------------------------------
-# STEP 6: Pairs for training: gt from render_shifted_av2 (SHIFTED_SCENE/gt/<cam>/...) + corrupted
+# STEP 6: Pairs for training: gt from render_shifted_splatad_av2 (SHIFTED_SCENE/gt/<cam>/...) + corrupted
 # -------------------------------------------------------
 echo ""
 echo ">>> STEP 6: Creating pairs (gt + corrupted) ..."

@@ -124,7 +124,7 @@ def main() -> None:
     parser.add_argument(
         "--shifted-root",
         required=True,
-        help="Shifted scene root (uses gt/<cam>/ and sensors/cameras/<cam>/ from render_shifted_av2)",
+        help="Shifted scene root (uses gt/<cam>/ and sensors/cameras/<cam>/ from shift-render scripts, e.g. render_shifted_splatad_av2)",
     )
     parser.add_argument("--reverse-root", required=True, help="Path to reverse-shifted scene")
     parser.add_argument("--output-dir", required=True, help="Directory for output .mp4 files")
