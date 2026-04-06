@@ -16,10 +16,6 @@
 #!/usr/bin/env python
 """
 Shifted render for Argoverse 2 with NeuRAD checkpoints.
-
-Lidar iteration must use the same split as cameras: ``FixedIndicesEvalDataloader(dataset=lidar_dataset)``
-(see ``render_shifted_neurad.py``). Do not use ``datamanager.fixed_indices_eval_lidar_dataloader`` alone,
-since that always wraps ``eval_lidar_dataset`` and breaks ``pose_source train``.
 """
 
 from __future__ import annotations
@@ -274,7 +270,6 @@ class ShiftedDatasetRender(BaseRender):
                 device=datamanager.device,
                 num_workers=datamanager.world_size * 4,
             )
-            # Must match ``split``: datamanager.fixed_indices_eval_lidar_dataloader is always eval-only.
             lidar_dataloader = FixedIndicesEvalDataloader(
                 dataset=lidar_dataset,
                 device=datamanager.device,
