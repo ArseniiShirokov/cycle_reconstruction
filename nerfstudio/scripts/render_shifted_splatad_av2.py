@@ -146,6 +146,8 @@ class ShiftedDatasetRender(BaseRender):
         default_factory=lambda: []
     )  # e.g. ["model.camera_optimizer.pose_adjustment", "_model.camera_optimizer.pose_adjustment"]
     """Keys to ignore when loading the config."""
+    load_step: Optional[int] = None
+    """If set, load this training step from ``nerfstudio_models`` instead of the latest checkpoint."""
 
     render_height: Optional[int] = None
     """Height to render the images at."""
@@ -186,6 +188,8 @@ class ShiftedDatasetRender(BaseRender):
             if self.downscale_factor is not None:
                 assert hasattr(data_manager_config.dataparser, "downscale_factor")
                 setattr(data_manager_config.dataparser, "downscale_factor", self.downscale_factor)
+            if self.load_step is not None:
+                config.load_step = self.load_step
             # Remove any frame limit on the the dataparser
             config.pipeline.datamanager.dataparser.max_eval_frames = None
             return config
